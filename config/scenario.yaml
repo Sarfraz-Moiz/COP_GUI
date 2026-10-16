@@ -1,0 +1,28 @@
+map:
+  center_lat: 28.28518
+  center_lon: 67.45433
+  zoom: 12
+
+simulation:
+  update_hz: 10
+  range_noise_stddev_m: 0.8
+  rangefinder_max_m: 3000
+  rangefinder_min_m: 2
+
+cameras:
+  - {id: CAM-01, name: Checkpost1, lat: 28.3150, lon: 67.4450, altitude_m: 95, heading_deg: 35,  fov_deg: 55, color: "#38BDF8", target_id: TGT-01, target_category: NONE, target_confidence: 0.0}
+  - {id: CAM-02, name: Checkpost2,  lat: 28.2920, lon: 67.4850, altitude_m: 120, heading_deg: 115, fov_deg: 60, color: "#4ADE80", target_id: TGT-02, target_category: FRIENDLY, target_confidence: 0.92}
+  - {id: CAM-03, name: Checkpost3,   lat: 28.2550, lon: 67.4650, altitude_m: 85, heading_deg: 180, fov_deg: 50, color: "#FACC15", target_id: TGT-03, target_category: SUSPICIOUS, target_confidence: 0.87, alarm_message: "Unverified target"}
+  - {id: CAM-04, name: Checkpost4,  lat: 28.2750, lon: 67.4150, altitude_m: 110, heading_deg: 285, fov_deg: 60, color: "#FB923C", target_id: TGT-04, target_category: NONE, target_confidence: 0.0}
+
+targets:
+  - {id: TGT-01, lat: 28.3000, lon: 67.4550, altitude_m: 20, color: "#FACC15", category: NONE, confidence: 0.0}
+  - {id: TGT-02, lat: 28.2850, lon: 67.4700, altitude_m: 15, color: "#FACC15", category: NONE, confidence: 0.0}
+  - {id: TGT-03, lat: 28.2700, lon: 67.4550, altitude_m: 18, color: "#FACC15", category: NONE, confidence: 0.0}
+  - {id: TGT-04, lat: 28.2850, lon: 67.4350, altitude_m: 12, color: "#FACC15", category: NONE, confidence: 0.0}
+
+assets:
+  - {checkpost_id: CP-01, name: Checkpost1, camera_id: CAM-01, uav_total: 4, uav_available: 3, status: ONLINE}
+  - {checkpost_id: CP-02, name: Checkpost2, camera_id: CAM-02, uav_total: 3, uav_available: 2, status: ONLINE}
+  - {checkpost_id: CP-03, name: Checkpost3, camera_id: CAM-03, uav_total: 5, uav_available: 4, status: ONLINE}
+  - {checkpost_id: CP-04, name: Checkpost4, camera_id: CAM-04, uav_total: 2, uav_available: 1, status: ONLINE}

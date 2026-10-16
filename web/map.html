@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CCM Operational Map</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+html,body,#map{height:100%;width:100%;margin:0;background:#07111d}
+.leaflet-container{background:#07111d;font-family:"Segoe UI",Arial,sans-serif}
+.leaflet-control-zoom a,.leaflet-control-layers{
+    background:#101c2a!important;color:#dce8f5!important;border-color:#314256!important
+}
+.leaflet-control-layers label{color:#dce8f5!important}
+.leaflet-control-attribution{background:rgba(7,13,21,.82)!important;color:#9fb1c4!important}
+.leaflet-control-attribution a{color:#9fc8f5!important}
+.label{background:rgba(5,12,20,.92);border:1px solid #33465b;color:#e7eef7;
+       padding:3px 6px;border-radius:4px;font-size:11px;font-weight:600}
+.status{position:absolute;left:12px;top:12px;z-index:1000;background:rgba(5,12,20,.94);
+        border:1px solid #314256;border-radius:7px;color:#aebfd1;padding:8px 11px;
+        font:12px "Segoe UI",Arial;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+.status b{color:#61e294}
+.mode{color:#7f9ab4;font-size:10px;margin-top:2px}
+.hover-info{font-family:"Segoe UI",Arial,sans-serif;font-size:11px;line-height:1.35;color:#dce8f5;background:rgba(5,12,20,.96);border:1px solid #3b526b;border-radius:7px;box-shadow:0 8px 24px rgba(0,0,0,.4);padding:9px 10px;min-width:190px;max-width:270px}.hover-info .title{font-size:12px;font-weight:700;color:#fff;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #314256}.hover-info .row{display:flex;justify-content:space-between;gap:12px}.hover-info .key{color:#8fa5ba}.hover-info .val{color:#edf5fc;font-weight:600;text-align:right}.hover-info .alarm{color:#ff7b7b}.hover-info .ok{color:#61e294}.offline{position:absolute;right:12px;bottom:12px;z-index:1000;background:rgba(5,12,20,.94);
+         border:1px solid #314256;border-radius:6px;color:#aebfd1;padding:7px 9px;font-size:10px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="status"><b>● LIVE MAP</b><div id="coords">Waiting for telemetry…</div><div id="mode" class="mode">STREET</div></div>
+<div class="offline" id="net">● ONLINE MAP ENGINE</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  const map=L.map('map',{zoomControl:true,preferCanvas:true,worldCopyJump:true,zoomSnap:1,zoomDelta:1,minZoom:2,maxZoom:19,scrollWheelZoom:true,doubleClickZoom:true,dragging:true,touchZoom:true,boxZoom:true,keyboard:true}).setView([0,0],2);
+
+  // Explicit providers. The previous Qt Location provider was removed because
+  // it selected Thunderforest through the generic OSM plugin.
+  const street=L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {maxZoom:19,attribution:'© OpenStreetMap contributors',subdomains:['a','b','c']}
+  );
+
+  const satellite=L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:19,maxNativeZoom:18,attribution:'© Esri'}
+  );
+
+  // Hybrid uses imagery as the base plus transparent OSM labels/roads.
+  const labels=L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {maxZoom:19,opacity:.62,attribution:'© OpenStreetMap contributors',subdomains:['a','b','c']}
+  );
+  const hybrid=L.layerGroup([satellite,labels]);
+
+  let localBase='';
+  let localStreet=null, localSatellite=null, localLabels=null;
+  function rebuildLocalLayers(){
+    if(localStreet){ map.removeLayer(localStreet); map.removeLayer(localSatellite); map.removeLayer(localLabels); }
+    if(!localBase) return;
+    localStreet=L.tileLayer(localBase+'/tiles/street/{z}/{x}/{y}.png',{maxZoom:19,opacity:1,attribution:''});
+    localSatellite=L.tileLayer(localBase+'/tiles/satellite/{z}/{x}/{y}.png',{maxZoom:19,opacity:1,attribution:''});
+    localLabels=L.tileLayer(localBase+'/tiles/labels/{z}/{x}/{y}.png',{maxZoom:19,opacity:.62,attribution:''});
+    // Cached layers sit above online layers. Missing cached tiles are transparent
+    // through Leaflet's tile error handling, allowing the online layer underneath.
+    [localStreet,localSatellite,localLabels].forEach(x=>x.on('tileerror',()=>{}));
+    if(activeMode==='Street') localStreet.addTo(map);
+    else if(activeMode==='Satellite') localSatellite.addTo(map);
+    else { localSatellite.addTo(map); localLabels.addTo(map); }
+  }
+
+  street.addTo(map);
+  // Operator navigation is intentionally independent from telemetry updates.
+  // Drag with the left mouse button and use the wheel or +/- controls to zoom.
+  L.control.scale({imperial:false,metric:true,maxWidth:120}).addTo(map);
+  let activeMode='Street';
+  const cameraLayers={}, targetLayers={}, fovLayers={}, headingLayers={}, linkLayers={};
+  let state={cameras:[],targets:[],links:[]}, selected=null;
+
+  function cIcon(c,sel){
+    const n=sel?22:18;
+    return L.divIcon({className:'',html:
+      `<div style="width:${n}px;height:${n}px;border-radius:50%;background:${c};
+      border:${sel?'3px solid white':'2px solid #0b1118'};
+      box-shadow:0 0 12px ${c}"></div>`,
+      iconSize:[n,n],iconAnchor:[n/2,n/2]});
+  }
+  function tIcon(c,sel){
+    return L.divIcon({className:'',html:
+      `<div style="width:14px;height:14px;transform:rotate(45deg);background:${c};
+      border:${sel?'3px solid white':'2px solid #101820'};
+      box-shadow:0 0 9px ${c}"></div>`,
+      iconSize:[18,18],iconAnchor:[9,9]});
+  }
+  function dest(lat,lon,bear,dist){
+    const R=6371008.8,b=bear*Math.PI/180,d=dist/R,p=lat*Math.PI/180,l=lon*Math.PI/180;
+    const p2=Math.asin(Math.sin(p)*Math.cos(d)+Math.cos(p)*Math.sin(d)*Math.cos(b));
+    const l2=l+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(p),
+      Math.cos(d)-Math.sin(p)*Math.sin(p2));
+    return [p2*180/Math.PI,((l2*180/Math.PI+540)%360)-180];
+  }
+  function fovPoly(c){
+    const r=300, half=Math.max(1,Math.min(170,c.fov||60))/2;
+    return [[c.lat,c.lon],dest(c.lat,c.lon,(c.heading||0)-half,r),
+            dest(c.lat,c.lon,(c.heading||0)+half,r)];
+  }
+  function headingLine(c){
+    return [[c.lat,c.lon],dest(c.lat,c.lon,c.heading||0,250)];
+  }
+  function esc(v){return String(v??"-").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
+  function row(k,v,cls=""){return `<div class="row"><span class="key">${esc(k)}</span><span class="val ${cls}">${esc(v)}</span></div>`;}
+  function cameraInfo(c){
+    const status=String(c.status||"UNKNOWN").toUpperCase();
+    const alarm=String(c.alarm||"NONE").toUpperCase();
+    return `<div class="hover-info"><div class="title">📷 ${esc(c.id)} — ${esc(c.name||c.id)}</div>`+
+      row("Latitude",Number(c.lat).toFixed(6)+"°")+
+      row("Longitude",Number(c.lon).toFixed(6)+"°")+
+      row("Altitude",Number(c.altitude||0).toFixed(1)+" m")+
+      row("Heading",Number(c.heading||0).toFixed(1)+"°")+
+      row("Azimuth",c.azimuth==null?"—":Number(c.azimuth).toFixed(1)+"°")+
+      row("Elevation",c.elevation==null?"—":Number(c.elevation).toFixed(1)+"°")+
+      row("FOV",Number(c.fov||0).toFixed(1)+"°")+
+      row("Range",c.range==null?"—":Number(c.range).toFixed(1)+" m")+
+      row("Status",status,status==="ONLINE"?"ok":"alarm")+
+      row("Alarm",alarm,alarm!=="NONE"?"alarm":"ok")+
+      `</div>`;
+  }
+  function targetInfo(t){
+    const cat=String(t.category||"NONE").toUpperCase();
+    return `<div class="hover-info"><div class="title">◈ ${esc(t.id)} — TARGET</div>`+
+      row("Latitude",Number(t.lat).toFixed(6)+"°")+
+      row("Longitude",Number(t.lon).toFixed(6)+"°")+
+      row("Altitude",Number(t.altitude||0).toFixed(1)+" m")+
+      row("Category",cat,cat!=="NONE"?"alarm":"ok")+
+      row("Confidence",(Number(t.confidence||0)*100).toFixed(1)+"%")+
+      `</div>`;
+  }
+  function attachHover(marker, html){
+    marker._ccmHoverHtml = html;
+    if(marker._ccmHoverAttached) return;
+    marker._ccmHoverAttached = true;
+    marker._ccmHoverTip = null;
+    marker.on('mouseover',function(){
+      if(marker._ccmHoverTip){ map.removeLayer(marker._ccmHoverTip); marker._ccmHoverTip=null; }
+      marker._ccmHoverTip = L.tooltip({direction:'top',offset:[0,-12],opacity:1,className:'ccm-hover',sticky:true})
+        .setContent(marker._ccmHoverHtml || '')
+        .setLatLng(marker.getLatLng()).addTo(map);
+    });
+    marker.on('mousemove',function(){
+      if(marker._ccmHoverTip) marker._ccmHoverTip.setLatLng(marker.getLatLng());
+    });
+    marker.on('mouseout',function(){
+      if(marker._ccmHoverTip){ map.removeLayer(marker._ccmHoverTip); marker._ccmHoverTip=null; }
+    });
+  }
+  function setText(){
+    if(state.cameras.length){
+      const c=state.cameras.find(x=>x.id===selected)||state.cameras[0];
+      document.getElementById('coords').textContent=
+        `${Number(c.lat).toFixed(5)}  |  ${Number(c.lon).toFixed(5)}  |  HDG ${Number(c.heading||0).toFixed(1)}°`;
+    }
+    document.getElementById('mode').textContent=activeMode.toUpperCase();
+  }
+
+  window.ccmMap={
+    update:function(s){
+      state=s||{cameras:[],targets:[],links:[]};
+      const seenC={},seenT={},seenL={},seenF={},seenH={};
+
+      (state.cameras||[]).forEach(c=>{
+        seenC[c.id]=1;
+        if(!cameraLayers[c.id]){
+          cameraLayers[c.id]=L.marker([c.lat,c.lon],{icon:cIcon(c.color||'#38bdf8',c.id===selected)})
+            .addTo(map).bindTooltip(c.id,{permanent:true,direction:'top',offset:[0,-10],className:'label'});
+          attachHover(cameraLayers[c.id],cameraInfo(c));
+          cameraLayers[c.id].on('click',()=>window.ccmMap.selectCamera(c.id));
+        } else {
+          cameraLayers[c.id].setLatLng([c.lat,c.lon]);
+          cameraLayers[c.id].setIcon(cIcon(c.color||'#38bdf8',c.id===selected));
+          cameraLayers[c.id].unbindTooltip();
+          cameraLayers[c.id].bindTooltip(c.id,{permanent:true,direction:'top',offset:[0,-10],className:'label'});
+          attachHover(cameraLayers[c.id],cameraInfo(c));
+        }
+        if(!fovLayers[c.id])
+          fovLayers[c.id]=L.polygon(fovPoly(c),{color:c.color,fillColor:c.color,fillOpacity:c.id===selected?.18:.07,weight:c.id===selected?3:1.2}).addTo(map);
+        else {fovLayers[c.id].setLatLngs(fovPoly(c));fovLayers[c.id].setStyle({color:c.color,fillColor:c.color});}
+        if(!headingLayers[c.id])
+          headingLayers[c.id]=L.polyline(headingLine(c),{color:c.color,weight:3,opacity:.9}).addTo(map);
+        else headingLayers[c.id].setLatLngs(headingLine(c));
+      });
+
+      (state.targets||[]).forEach(t=>{
+        seenT[t.id]=1;
+        if(!targetLayers[t.id]) {
+          targetLayers[t.id]=L.marker([t.lat,t.lon],{icon:tIcon(t.color||'#facc15',false)})
+            .addTo(map).bindTooltip(t.id,{permanent:true,direction:'right',offset:[8,0],className:'label'});
+          attachHover(targetLayers[t.id],targetInfo(t));
+        } else {
+          targetLayers[t.id].setLatLng([t.lat,t.lon]);
+          targetLayers[t.id].setIcon(tIcon(t.color||'#facc15',false));
+          targetLayers[t.id].unbindTooltip();
+          targetLayers[t.id].bindTooltip(t.id,{permanent:true,direction:'right',offset:[8,0],className:'label'});
+          attachHover(targetLayers[t.id],targetInfo(t));
+        }
+      });
+
+      (state.links||[]).forEach(l=>{
+        const a=cameraLayers[l.camera_id],b=targetLayers[l.target_id];
+        if(!a||!b)return;
+        seenL[l.camera_id]=1;
+        const pts=[a.getLatLng(),b.getLatLng()];
+        if(!linkLayers[l.camera_id])
+          linkLayers[l.camera_id]=L.polyline(pts,{color:l.color||'#64748b',weight:2,dashArray:'7 6',opacity:.85}).addTo(map);
+        else linkLayers[l.camera_id].setLatLngs(pts);
+      });
+
+      Object.keys(cameraLayers).forEach(k=>{if(!seenC[k]){map.removeLayer(cameraLayers[k]);delete cameraLayers[k];}});
+      Object.keys(targetLayers).forEach(k=>{if(!seenT[k]){map.removeLayer(targetLayers[k]);delete targetLayers[k];}});
+      Object.keys(fovLayers).forEach(k=>{if(!seenC[k]){map.removeLayer(fovLayers[k]);delete fovLayers[k];}});
+      Object.keys(headingLayers).forEach(k=>{if(!seenC[k]){map.removeLayer(headingLayers[k]);delete headingLayers[k];}});
+      Object.keys(linkLayers).forEach(k=>{if(!seenL[k]){map.removeLayer(linkLayers[k]);delete linkLayers[k];}});
+      setText();
+    },
+    setSelected:function(id){
+      selected=id;
+      Object.keys(cameraLayers).forEach(k=>{
+        const c=(state.cameras||[]).find(x=>x.id===k);
+        if(c)cameraLayers[k].setIcon(cIcon(c.color||'#38bdf8',k===selected));
+        if(fovLayers[k])fovLayers[k].setStyle({fillOpacity:k===selected?.18:.07,weight:k===selected?3:1.2});
+      });
+      setText();
+    },
+    selectCamera:function(id){
+      window.ccmMap.setSelected(id);
+      const c=(state.cameras||[]).find(x=>x.id===id);
+      if(c)map.setView([c.lat,c.lon],map.getZoom(),{animate:true});
+    },
+    centerOn:function(lat,lon,z){map.setView([lat,lon],z||15,{animate:true});},
+    fitAll:function(){
+      const layers=[...Object.values(cameraLayers),...Object.values(targetLayers)];
+      if(layers.length)map.fitBounds(L.featureGroup(layers).getBounds().pad(.15));
+    },
+    invalidateSize:function(){
+      map.invalidateSize({animate:false,pan:false});
+    },
+    setTileServer:function(url){
+      localBase=url||'';
+      rebuildLocalLayers();
+    },
+    setMode:function(mode){
+      mode=mode||'Street';
+      if(activeMode===mode)return;
+      [street,satellite,hybrid].forEach(x=>{if(map.hasLayer(x))map.removeLayer(x);});
+      [localStreet,localSatellite,localLabels].forEach(x=>{if(x && map.hasLayer(x))map.removeLayer(x);});
+      if(mode==='Satellite')satellite.addTo(map);
+      else if(mode==='Hybrid')hybrid.addTo(map);
+      else street.addTo(map);
+      activeMode=mode;
+      rebuildLocalLayers();
+      setText();
+    }
+  };
+
+  // Do not automatically switch to a provider that requires credentials.
+  // The selector in the Qt UI is the authoritative mode control.
+  window.addEventListener('online',()=>document.getElementById('net').textContent='● ONLINE MAP ENGINE');
+  window.addEventListener('offline',()=>document.getElementById('net').textContent='● OFFLINE / CACHE ONLY');
+  setTimeout(()=>map.invalidateSize(),300);
+  window.addEventListener('resize',()=>map.invalidateSize());
+})();
+</script>
+</body>
+</html>
